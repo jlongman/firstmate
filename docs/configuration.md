@@ -209,6 +209,19 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Crew sandbox (config/crew-sandbox)
+
+`config/crew-sandbox` is an optional local, gitignored file that selects OS-level confinement for claude crewmates through Anthropic's sandbox-runtime (`srt`).
+[`docs/crewmate-sandbox.md`](crewmate-sandbox.md) owns the design, and [`bin/fm-check-sandbox-policy.sh`](../bin/fm-check-sandbox-policy.sh) owns the preflight, the `srt` invocation, and the per-task settings shape.
+The first token is read case-insensitively and takes one of three values.
+`off` is the default, and an absent file is off: the launch is byte-identical to a build without this feature, with no sandbox.
+`srt` (alias `on`) wraps the launch in `srt`, or refuses the spawn when the `srt` preflight fails, so a home that requested confinement never silently launches unconfined.
+`auto` wraps the launch when the preflight passes and otherwise launches plain with a loud warning; any other value is rejected.
+Confinement governs claude ship and scout crewmates only, so another harness, or any secondmate, launches unchanged even when the knob is set, with a warning rather than a silent non-application.
+`fm-spawn.sh` resolves the mode once per spawn before any worktree is created, so a required-`srt` host that fails the preflight refuses cheaply, and it records the outcome in task meta as `sandbox=on` for an `srt`-wrapped launch or `sandbox=off` for the plain launch.
+For an `srt` launch `fm-spawn.sh` also scrubs the secret environment variables outside the sandbox and writes the git-excluded per-task `srt-settings.json` into the worktree, both owned by the scripts above.
+`config/crew-sandbox` is a per-home operating choice and is not inherited into secondmate homes.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
