@@ -977,7 +977,13 @@ SRT_CMD=
 if [ "$CREW_SANDBOX_MODE" != off ]; then
   if [ "$KIND" = secondmate ] || [ "$HARNESS" != claude ]; then
     # srt wraps `claude`; it has nothing to wrap for another harness, and secondmate
-    # confinement is out of scope. Never silently imply confinement that is not applied.
+    # confinement is out of scope. Strict mode (srt/on) fails closed and refuses rather
+    # than launch an agent the operator expected to be confined; auto warns and launches
+    # unconfined. Never silently imply confinement that is not applied.
+    if [ "$CREW_SANDBOX_MODE" = srt ]; then
+      echo "error: config/crew-sandbox=srt (strict) requested, but srt confinement covers claude ship/scout crewmates only; refusing to launch $HARNESS $KIND unconfined" >&2
+      exit 1
+    fi
     echo "warning: config/crew-sandbox=$CREW_SANDBOX_MODE requested, but srt confinement covers claude ship/scout crewmates only; launching $HARNESS $KIND unconfined." >&2
   elif "$SCRIPT_DIR/fm-check-sandbox-policy.sh" preflight; then
     SRT_CMD=$("$SCRIPT_DIR/fm-check-sandbox-policy.sh" resolve) || SRT_CMD=
@@ -1897,12 +1903,21 @@ if [ "$KIND" != secondmate ]; then
 EOF
       exclude_path '.claude/settings.local.json'
       if [ "$SANDBOX_ACTIVE" = 1 ]; then
+        # CodeArtifact host derived ONCE from the FM_CODEARTIFACT_* overrides so the srt
+        # egress allowlist (emit-settings) and the vended-token registry host below cannot
+        # drift: a non-default domain/owner/region vends a token for exactly the host srt
+        # allows.
+        _ca_domain="${FM_CODEARTIFACT_DOMAIN:-mavtek}"
+        _ca_owner="${FM_CODEARTIFACT_OWNER:-840225427682}"
+        _ca_region="${FM_CODEARTIFACT_REGION:-us-east-1}"
+        _ca_repo="${FM_CODEARTIFACT_REPO:-npm}"
+        _ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"
         # srt OS confinement (docs/crewmate-sandbox.md). The per-task settings file - the
         # egress allowlist, credential-read denials, and worktree/git write scope - is
         # written by the sandbox policy owner and git-excluded like the other generated
         # worktree files. The Stop hook above is unchanged and still fires under srt
         # because $TURNEND is a single-file allowWrite entry in that settings file.
-        "$FM_ROOT/bin/fm-check-sandbox-policy.sh" emit-settings "$WT" "$TASK_TMP" "$TURNEND" > "$WT/srt-settings.json" || {
+        "$FM_ROOT/bin/fm-check-sandbox-policy.sh" emit-settings "$WT" "$TASK_TMP" "$TURNEND" "$_ca_host" > "$WT/srt-settings.json" || {
           echo "error: could not generate srt-settings.json for $ID; refusing to launch unconfined" >&2
           exit 1
         }
@@ -1922,11 +1937,6 @@ EOF
             # crewmate must rely on the repo's own env-based CodeArtifact auth.
             echo "warning: $WT/.npmrc is git-tracked; refusing to vend a CodeArtifact token into a tracked file for $ID. The sandboxed crewmate must rely on the repo's own env-based CodeArtifact auth." >&2
           else
-            _ca_domain="${FM_CODEARTIFACT_DOMAIN:-mavtek}"
-            _ca_owner="${FM_CODEARTIFACT_OWNER:-840225427682}"
-            _ca_region="${FM_CODEARTIFACT_REGION:-us-east-1}"
-            _ca_repo="${FM_CODEARTIFACT_REPO:-npm}"
-            _ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"
             if _ca_token=$(aws codeartifact get-authorization-token \
                   --domain "$_ca_domain" --domain-owner "$_ca_owner" \
                   --region "$_ca_region" --query authorizationToken --output text 2>/dev/null) \

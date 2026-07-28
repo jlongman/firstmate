@@ -26,7 +26,7 @@
 #       Best-effort srt PACKAGE version, read from its package.json (never
 #       `srt --version`, which mis-reports 1.0.0). Prints "unknown" when it cannot
 #       be resolved; never fails the caller.
-#   fm-check-sandbox-policy.sh emit-settings <worktree> <task-tmp> <turn-ended>
+#   fm-check-sandbox-policy.sh emit-settings <worktree> <task-tmp> <turn-ended> [<codeartifact-host>]
 #       Print the per-task srt-settings.json to stdout. Resolves the worktree's
 #       ABSOLUTE git-common-dir (it differs per worktree) so writes to the shared
 #       git dir succeed for refs and the index, while denyWrite re-blocks the
@@ -38,21 +38,29 @@ usage() {
   sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 }
 
+# The default CodeArtifact registry host, used when emit-settings is called without
+# an explicit host. Callers that override FM_CODEARTIFACT_DOMAIN/OWNER/REGION pass the
+# derived host so the allowlist and the vended-token host cannot drift.
+SRT_DEFAULT_CODEARTIFACT_HOST='mavtek-840225427682.d.codeartifact.us-east-1.amazonaws.com'
+
 # The authoritative crewmate egress allowlist (network.allowedDomains). This is
 # the list empirically verified to run claude autonomously while confined
 # (data/srt-sandbox-spike/report.md section 1): the Anthropic API and its
-# telemetry, Sentry, GitHub, and the org's CodeArtifact registry host. Kept as the
-# single copy so it never drifts; docs/crewmate-sandbox.md points here.
-SRT_ALLOWED_DOMAINS='
+# telemetry, Sentry, GitHub, and the org's CodeArtifact registry host (parameterized
+# by $1). Kept as the single copy so it never drifts; docs/crewmate-sandbox.md points here.
+srt_allowed_domains() {
+  local ca_host=${1:-$SRT_DEFAULT_CODEARTIFACT_HOST}
+  cat <<EOF
 api.anthropic.com
 statsig.anthropic.com
 *.sentry.io
-mavtek-840225427682.d.codeartifact.us-east-1.amazonaws.com
+$ca_host
 github.com
 *.github.com
 codeload.github.com
 *.githubusercontent.com
-'
+EOF
+}
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -84,9 +92,9 @@ srt_version() {
 
 # Print the per-task srt-settings.json for one worktree spawn.
 emit_settings() {
-  local wt=$1 task_tmp=$2 turnend=$3 gcd domains_json d first ej_tmp ej_gcd ej_turn
+  local wt=$1 task_tmp=$2 turnend=$3 ca_host=${4:-} gcd domains_json d first ej_tmp ej_gcd ej_turn
   [ -n "$wt" ] && [ -n "$task_tmp" ] && [ -n "$turnend" ] || {
-    echo "error: emit-settings needs <worktree> <task-tmp> <turn-ended>" >&2
+    echo "error: emit-settings needs <worktree> <task-tmp> <turn-ended> [<codeartifact-host>]" >&2
     return 2
   }
   gcd=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || {
@@ -102,7 +110,7 @@ emit_settings() {
     if [ "$first" = 1 ]; then first=0; else domains_json="$domains_json, "; fi
     domains_json="$domains_json\"$(json_escape "$d")\""
   done <<EOF
-$SRT_ALLOWED_DOMAINS
+$(srt_allowed_domains "$ca_host")
 EOF
 
   ej_tmp=$(json_escape "$task_tmp")
@@ -114,7 +122,10 @@ EOF
   # and everything under it (branch/ref/index writes in a linked worktree), the
   # SINGLE turn-end file outside the worktree (the Stop hook's only external write -
   # never the whole state/ dir), and claude's own home config it writes at runtime.
-  # denyWrite wins over allowWrite and re-blocks the parent .git/config and hooks.
+  # denyWrite wins over allowWrite and re-blocks the parent .git/config and hooks, and
+  # claude's own hook-execution config (~/.claude/settings*.json and ~/.claude/hooks)
+  # so a confined crewmate cannot plant a global hook that runs in the captain's
+  # future unconfined claude sessions.
   cat <<EOF
 {
   "network": {
@@ -136,7 +147,11 @@ EOF
       "$ej_gcd/config",
       "$ej_gcd/config.**",
       "$ej_gcd/hooks",
-      "$ej_gcd/hooks/**"
+      "$ej_gcd/hooks/**",
+      "~/.claude/settings.json",
+      "~/.claude/settings.local.json",
+      "~/.claude/hooks",
+      "~/.claude/hooks/**"
     ]
   }
 }
@@ -181,7 +196,7 @@ case "${1:-}" in
   preflight) preflight ;;
   resolve) resolve_srt_cmd ;;
   version) srt_version ;;
-  emit-settings) shift; emit_settings "${1:-}" "${2:-}" "${3:-}" ;;
+  emit-settings) shift; emit_settings "${1:-}" "${2:-}" "${3:-}" "${4:-}" ;;
   '') echo "error: missing subcommand (preflight|resolve|version|emit-settings)" >&2; exit 2 ;;
   *) echo "error: unknown subcommand '$1' (preflight|resolve|version|emit-settings)" >&2; exit 2 ;;
 esac

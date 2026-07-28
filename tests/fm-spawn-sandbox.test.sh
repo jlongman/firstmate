@@ -127,6 +127,19 @@ case "$src" in
   *) fail "auto must warn and fall back to a plain launch on preflight failure" ;;
 esac
 
+# A worker srt cannot wrap (secondmate, or a non-claude harness) fails closed under
+# strict srt/on: REFUSE and exit, never launch unconfined. auto only warns and launches.
+case "$src" in
+  *'if [ "$KIND" = secondmate ] || [ "$HARNESS" != claude ]; then'*'if [ "$CREW_SANDBOX_MODE" = srt ]; then'*'refusing to launch $HARNESS $KIND unconfined'*'exit 1'*)
+    pass "strict srt/on refuses (exits) a non-claude crewmate or any secondmate" ;;
+  *) fail "strict srt/on must refuse a non-claude/secondmate worker, not launch it unconfined" ;;
+esac
+case "$src" in
+  *'config/crew-sandbox=$CREW_SANDBOX_MODE requested, but srt confinement covers claude ship/scout crewmates only; launching $HARNESS $KIND unconfined.'*)
+    pass "auto (non-claude/secondmate) warns and continues to a plain launch" ;;
+  *) fail "auto must warn and launch a non-claude/secondmate worker unconfined" ;;
+esac
+
 # The turn-end Stop hook is unchanged and stays a SINGLE-file allow (never the whole state dir).
 # shellcheck disable=SC2016  # matching literal source text; $TURNEND must stay unexpanded
 case "$src" in
@@ -167,10 +180,33 @@ sneed() { case "$settings" in *"$1"*) pass "settings: $2" ;; *) fail "settings: 
 
 # Network: authoritative egress allowlist + empty deniedDomains.
 sneed '"api.anthropic.com"'                         "Anthropic API is allowlisted"
-sneed '"mavtek-840225427682.d.codeartifact.us-east-1.amazonaws.com"' "CodeArtifact host is allowlisted"
+# The 3-arg call (no CodeArtifact host) yields the default org host, byte-identical
+# to before the host became a parameter.
+sneed '"mavtek-840225427682.d.codeartifact.us-east-1.amazonaws.com"' "3-arg emit-settings allowlists the default CodeArtifact host"
 sneed '"*.github.com"'                              "GitHub is allowlisted"
 sneed '"deniedDomains": []'                         "deniedDomains is empty"
 case "$settings" in *npmjs*) fail "settings: npmjs must NOT be allowlisted (packages route through CodeArtifact)" ;; *) pass "settings: npmjs is not allowlisted" ;; esac
+
+# A non-default CodeArtifact host (4th arg) must flow into network.allowedDomains, so
+# the allowlist host and the vended-token host in fm-spawn.sh cannot drift when
+# FM_CODEARTIFACT_DOMAIN/OWNER/REGION are overridden.
+CA_ALT='acme-111122223333.d.codeartifact.eu-west-1.amazonaws.com'
+settings_alt=$("$POLICY" emit-settings "$TMP/wt" "$TASK_TMP" "$TURNEND" "$CA_ALT") || fail "emit-settings failed with a CodeArtifact host argument"
+case "$settings_alt" in
+  *"\"$CA_ALT\""*) pass "settings: a non-default CodeArtifact host argument flows into network.allowedDomains" ;;
+  *) fail "settings: the CodeArtifact host argument must appear in network.allowedDomains" ;;
+esac
+case "$settings_alt" in
+  *'mavtek-840225427682.d.codeartifact.us-east-1.amazonaws.com'*) fail "settings: the default host must be REPLACED by the host argument, not both present" ;;
+  *) pass "settings: the host argument replaces the default (no drift between allowlist and vend)" ;;
+esac
+# fm-spawn.sh must derive the vended host from the SAME FM_CODEARTIFACT_* source it
+# passes to emit-settings, so the allowlist and the .npmrc registry cannot diverge.
+case "$src" in
+  *'_ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"'*'emit-settings "$WT" "$TASK_TMP" "$TURNEND" "$_ca_host"'*)
+    pass "fm-spawn.sh derives _ca_host once and passes it to emit-settings (allowlist == vend host)" ;;
+  *) fail "fm-spawn.sh must compute _ca_host once and pass it to emit-settings" ;;
+esac
 
 # Filesystem reads: the credential dirs are denied.
 sneed '"denyRead": ["~/.ssh", "~/.aws", "~/.config/gh"]' "denyRead covers ~/.ssh, ~/.aws, ~/.config/gh"
@@ -196,6 +232,15 @@ sneed "\"$MAIN_GIT/config\""                        "denyWrite re-blocks the par
 sneed "\"$MAIN_GIT/config.**\""                     "denyWrite re-blocks .git/config.* variants"
 sneed "\"$MAIN_GIT/hooks\""                         "denyWrite re-blocks .git/hooks"
 sneed "\"$MAIN_GIT/hooks/**\""                      "denyWrite re-blocks everything under .git/hooks"
+
+# denyWrite ALSO re-blocks claude's own hook-execution config, exactly like the parent
+# .git/config and hooks: a confined crewmate must not be able to plant a global hook
+# that runs in the captain's future unconfined claude sessions. ~/.claude stays
+# writable (session/telemetry state); only the settings/hook paths are re-blocked.
+sneed '"~/.claude/settings.json"'                   "denyWrite re-blocks ~/.claude/settings.json"
+sneed '"~/.claude/settings.local.json"'             "denyWrite re-blocks ~/.claude/settings.local.json"
+sneed '"~/.claude/hooks"'                           "denyWrite re-blocks ~/.claude/hooks"
+sneed '"~/.claude/hooks/**"'                         "denyWrite re-blocks everything under ~/.claude/hooks"
 
 # The git-common-dir must be resolved per worktree: a plain repo resolves to its own
 # .git, which is a DIFFERENT path than the linked worktree's shared common dir above.
