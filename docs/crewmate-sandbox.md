@@ -24,7 +24,7 @@ There are three values:
 - `auto` wraps the launch when the preflight passes and otherwise falls back to a plain launch with a loud warning.
 
 Confinement covers claude ship and scout crewmates only.
-Another harness, or a secondmate, launches unchanged even when the knob is set, with a warning so the unconfined launch is never silent.
+`srt` cannot wrap another harness or a secondmate, so the knob fails closed there: strict `srt`/`on` **refuses** the spawn rather than launch an agent the operator expected to be confined, while `auto` launches unchanged with a loud warning so the unconfined launch is never silent.
 The posture is recorded in each task's durable record as `sandbox=on|off`.
 
 ## What the boundary allows
@@ -36,6 +36,7 @@ That script is the single owner of the settings shape; the shape is summarized h
 - Credential reads are denied: `~/.ssh`, `~/.aws`, and `~/.config/gh`.
 - Writes are limited to the worktree, the task's temp root, the shared git-common-dir (so branch, ref, and index writes work in a linked worktree), claude's own home config, and the single turn-end signal file.
 - Writes to the parent `.git/config` and `.git/hooks` are re-blocked even though the whole git-common-dir is writable, because allowing them would let a crewmate set a hook or filter and gain code execution on the next git operation in the parent checkout.
+- Writes to claude's own hook-execution config (`~/.claude/settings.json`, `~/.claude/settings.local.json`, and `~/.claude/hooks`) are re-blocked in exactly the same way even though `~/.claude` is otherwise writable, because a hook planted there would run in the captain's future unconfined claude sessions.
 
 Two caveats are engineered into the launch rather than left to `srt`:
 
