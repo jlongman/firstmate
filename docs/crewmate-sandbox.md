@@ -46,6 +46,7 @@ Two caveats are engineered into the launch rather than left to `srt`:
 
 When a repo uses the org's CodeArtifact registry, the sandboxed crewmate cannot authenticate to it (the boundary denies `~/.aws` and the AWS env vars are scrubbed).
 So `bin/fm-spawn.sh` vends the short-lived npm token outside the sandbox, as the launching user with a live AWS session, into a worktree-local `.npmrc` that the crewmate only reads.
+The token is only ever written to an untracked worktree `.npmrc`, never a git-tracked one: if the repo commits its own `.npmrc`, the vend refuses with a warning and leaves the tracked file alone, so a live token can never land in a tracked modification an autonomous crewmate might commit and push.
 The vend is best-effort: on failure it warns and launches anyway, and the token is short-lived, so it is vended fresh on every spawn.
 
 ## Preflight
