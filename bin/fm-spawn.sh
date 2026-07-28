@@ -128,6 +128,12 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __SRTCMD__    resolved srt invocation prefix, for an srt-confined claude launch
+#                   (config/crew-sandbox=srt|on|auto; fm-check-sandbox-policy.sh resolve)
+#     __SRTSETTINGS__ absolute path to the worktree's srt-settings.json for that launch
+# For an srt-confined claude crewmate the launch is wrapped in srt with the secret env
+# vars scrubbed outside the wall; config/crew-sandbox selects it and meta records
+# sandbox=on|off (docs/configuration.md "Crew sandbox").
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -808,7 +814,7 @@ fi
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship}
+  local harness=$1 kind=${2:-ship} sandbox=${3:-0}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -820,7 +826,21 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude)
+      if [ "$sandbox" = 1 ]; then
+        # srt-confined launch (config/crew-sandbox = srt|on|auto; docs/crewmate-sandbox.md).
+        # `env -u` scrubs the secret vars OUTSIDE the wall, because srt does not touch
+        # environment variables (report section 2); then srt wraps the WHOLE claude
+        # process (Read/Edit/WebFetch/MCP, not just Bash). --dangerously-skip-permissions
+        # STAYS: under srt it is sanctioned in-wall autonomy, not a boundary bypass - the
+        # OS wall still enforces (report section 2). __SRTCMD__ is the resolved srt
+        # invocation, __SRTSETTINGS__ the per-task settings file; the brief-passing is
+        # byte-identical to the plain template below.
+        printf '%s' 'env -u ANTHROPIC_API_KEY -u GITHUB_TOKEN -u GH_TOKEN -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN __SRTCMD__ --settings __SRTSETTINGS__ env CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -920,6 +940,53 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
         *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
       esac
     fi
+  fi
+fi
+
+# Crew OS-confinement mode (config/crew-sandbox; docs/configuration.md "Crew
+# sandbox"). Resolved once per spawn, BEFORE any window or worktree is created, so
+# a host that requires srt but fails its preflight refuses cheaply. srt confinement
+# governs claude ship/scout crewmates only; every other harness and every
+# secondmate launches exactly as before. Modes: off (default; absent file = off) is
+# today's plain launch, byte-identical; srt (alias on) wraps the launch in srt or
+# refuses the spawn if the preflight fails; auto wraps when the preflight passes and
+# otherwise launches plain with a loud warning. fm-check-sandbox-policy.sh owns the
+# preflight, the srt invocation, and the per-task settings shape.
+CREW_SANDBOX_MODE=off
+if [ -f "$CONFIG/crew-sandbox" ]; then
+  crew_sandbox_raw=$(tr -d '[:space:]' < "$CONFIG/crew-sandbox" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+  case "$crew_sandbox_raw" in
+    ''|off) CREW_SANDBOX_MODE=off ;;
+    on|srt) CREW_SANDBOX_MODE=srt ;;
+    auto)   CREW_SANDBOX_MODE=auto ;;
+    *)
+      echo "error: config/crew-sandbox has unrecognized value '$crew_sandbox_raw' (expected: off, srt (or on), or auto)" >&2
+      exit 1
+      ;;
+  esac
+fi
+SANDBOX_ACTIVE=0
+SRT_CMD=
+if [ "$CREW_SANDBOX_MODE" != off ]; then
+  if [ "$KIND" = secondmate ] || [ "$HARNESS" != claude ]; then
+    # srt wraps `claude`; it has nothing to wrap for another harness, and secondmate
+    # confinement is out of scope. Never silently imply confinement that is not applied.
+    echo "warning: config/crew-sandbox=$CREW_SANDBOX_MODE requested, but srt confinement covers claude ship/scout crewmates only; launching $HARNESS $KIND unconfined." >&2
+  elif "$SCRIPT_DIR/fm-check-sandbox-policy.sh" preflight; then
+    SRT_CMD=$("$SCRIPT_DIR/fm-check-sandbox-policy.sh" resolve) || SRT_CMD=
+    if [ -n "$SRT_CMD" ]; then
+      SANDBOX_ACTIVE=1
+    elif [ "$CREW_SANDBOX_MODE" = srt ]; then
+      echo "error: config/crew-sandbox=srt but the srt invocation could not be resolved after a passing preflight; refusing to launch unconfined" >&2
+      exit 1
+    else
+      echo "warning: config/crew-sandbox=auto could not resolve the srt invocation; launching unconfined" >&2
+    fi
+  elif [ "$CREW_SANDBOX_MODE" = srt ]; then
+    echo "error: config/crew-sandbox=srt but the srt preflight failed (see SANDBOX_PREFLIGHT above); refusing to launch unconfined" >&2
+    exit 1
+  else
+    echo "warning: config/crew-sandbox=auto but the srt preflight failed (see SANDBOX_PREFLIGHT above); launching unconfined" >&2
   fi
 fi
 
@@ -1822,6 +1889,45 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
+      if [ "$SANDBOX_ACTIVE" = 1 ]; then
+        # srt OS confinement (docs/crewmate-sandbox.md). The per-task settings file - the
+        # egress allowlist, credential-read denials, and worktree/git write scope - is
+        # written by the sandbox policy owner and git-excluded like the other generated
+        # worktree files. The Stop hook above is unchanged and still fires under srt
+        # because $TURNEND is a single-file allowWrite entry in that settings file.
+        "$FM_ROOT/bin/fm-check-sandbox-policy.sh" emit-settings "$WT" "$TASK_TMP" "$TURNEND" > "$WT/srt-settings.json" || {
+          echo "error: could not generate srt-settings.json for $ID; refusing to launch unconfined" >&2
+          exit 1
+        }
+        exclude_path 'srt-settings.json'
+        # CodeArtifact token vend: srt denies ~/.aws and `env -u` scrubs AWS_* OUTSIDE the
+        # wall, so the sandboxed crewmate cannot authenticate to CodeArtifact itself. This
+        # spawn runs as the captain with a live AWS session, so vend the short-lived npm
+        # token here into a worktree-local .npmrc the crewmate only READS (allowed under
+        # "."). Guarded on the repo using CodeArtifact; best-effort (a vend failure warns
+        # and launches anyway); the token is ~12h, so vend fresh on every spawn.
+        if grep -qs 'codeartifact' "$WT/.npmrc" 2>/dev/null || [ -n "${FM_CODEARTIFACT_DOMAIN:-}" ]; then
+          _ca_domain="${FM_CODEARTIFACT_DOMAIN:-mavtek}"
+          _ca_owner="${FM_CODEARTIFACT_OWNER:-840225427682}"
+          _ca_region="${FM_CODEARTIFACT_REGION:-us-east-1}"
+          _ca_repo="${FM_CODEARTIFACT_REPO:-npm}"
+          _ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"
+          if _ca_token=$(aws codeartifact get-authorization-token \
+                --domain "$_ca_domain" --domain-owner "$_ca_owner" \
+                --region "$_ca_region" --query authorizationToken --output text 2>/dev/null) \
+             && [ -n "$_ca_token" ]; then
+            {
+              printf 'registry=https://%s/npm/%s/\n' "$_ca_host" "$_ca_repo"
+              printf '//%s/npm/%s/:_authToken=%s\n' "$_ca_host" "$_ca_repo" "$_ca_token"
+              printf '//%s/npm/%s/:always-auth=true\n' "$_ca_host" "$_ca_repo"
+            } > "$WT/.npmrc"
+            exclude_path '.npmrc'
+          else
+            echo "warning: CodeArtifact token vend failed for $ID; sandboxed crewmate npm/pnpm installs will fail until a valid AWS session vends a token" >&2
+          fi
+          unset _ca_token
+        fi
+      fi
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -2030,6 +2136,12 @@ else
   fi
 fi
 
+# Confinement posture: on = the launch is srt-wrapped, off = plain launch (the
+# default). Recorded so supervision and teardown can see the posture at a glance
+# (docs/configuration.md "Crew sandbox").
+SANDBOX_META=off
+[ "$SANDBOX_ACTIVE" = 1 ] && SANDBOX_META=on
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -2045,6 +2157,7 @@ META_WINDOW=$T
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
+  echo "sandbox=$SANDBOX_META"
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2082,6 +2195,16 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+# For an srt-confined claude spawn, regenerate LAUNCH from the sandbox variant of
+# the same template owner (launch_template), then fill the two srt placeholders:
+# __SRTCMD__ is the resolved srt command prefix, substituted raw; __SRTSETTINGS__ is
+# the per-task settings path, shell-quoted. All other placeholders below still apply.
+if [ "$SANDBOX_ACTIVE" = 1 ] && [ "$HARNESS" = claude ]; then
+  LAUNCH=$(launch_template claude "$KIND" 1)
+  sq_srtsettings=$(shell_quote "$WT/srt-settings.json")
+  LAUNCH=${LAUNCH//__SRTCMD__/$SRT_CMD}
+  LAUNCH=${LAUNCH//__SRTSETTINGS__/$sq_srtsettings}
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
