@@ -99,6 +99,22 @@ need 'exclude_path '\''srt-settings.json'\''' "srt-settings.json is git-excluded
 need 'echo "sandbox=$SANDBOX_META"'        "meta records sandbox=on|off"
 need 'codeartifact'                        "CodeArtifact token vend is present"
 
+# The vend must never write a live token into a git-tracked .npmrc: guard on the
+# path being untracked, warn-and-skip when tracked, and only write+exclude when not.
+need 'ls-files --error-unmatch .npmrc'     "CodeArtifact vend guards on .npmrc being untracked"
+case "$src" in
+  *'ls-files --error-unmatch .npmrc'*'refusing to vend a CodeArtifact token into a tracked file'*)
+    pass "tracked .npmrc: vend refuses and warns (no token written, no exclude_path)" ;;
+  *) fail "tracked .npmrc must be skipped with a warning, never overwritten with a token" ;;
+esac
+# The write + exclude only happen in the untracked branch (after the ls-files guard),
+# so a tracked, committed .npmrc is never left dirty with a live token.
+case "$src" in
+  *'ls-files --error-unmatch .npmrc'*'} > "$WT/.npmrc"'*'exclude_path '\''.npmrc'\'''*)
+    pass "untracked .npmrc: token is written and git-excluded" ;;
+  *) fail "untracked .npmrc write + exclude_path must follow the ls-files untracked guard" ;;
+esac
+
 # srt/on must REFUSE the spawn on a failed preflight; auto must fall back with a warning.
 case "$src" in
   *'config/crew-sandbox=srt but the srt preflight failed'*'refusing to launch unconfined'*)

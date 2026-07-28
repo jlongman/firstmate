@@ -580,7 +580,14 @@ fi
 # preflight, the srt invocation, and the per-task settings shape.
 CREW_SANDBOX_MODE=off
 if [ -f "$CONFIG/crew-sandbox" ]; then
-  crew_sandbox_raw=$(tr -d '[:space:]' < "$CONFIG/crew-sandbox" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+  # Read only the FIRST whitespace-delimited token of the first non-empty,
+  # non-comment line, lowercased (docs/configuration.md: "the first token is read
+  # case-insensitively"). An absent, empty, or comment-only file - and any trailing
+  # content after that token - resolves to the default off; only a non-empty first
+  # token outside the known set is an error.
+  crew_sandbox_raw=$(awk '
+    { if (NF == 0) next; if (substr($1, 1, 1) == "#") next; print tolower($1); exit }
+  ' "$CONFIG/crew-sandbox" 2>/dev/null || true)
   case "$crew_sandbox_raw" in
     ''|off) CREW_SANDBOX_MODE=off ;;
     on|srt) CREW_SANDBOX_MODE=srt ;;
@@ -1423,25 +1430,34 @@ EOF
         # "."). Guarded on the repo using CodeArtifact; best-effort (a vend failure warns
         # and launches anyway); the token is ~12h, so vend fresh on every spawn.
         if grep -qs 'codeartifact' "$WT/.npmrc" 2>/dev/null || [ -n "${FM_CODEARTIFACT_DOMAIN:-}" ]; then
-          _ca_domain="${FM_CODEARTIFACT_DOMAIN:-mavtek}"
-          _ca_owner="${FM_CODEARTIFACT_OWNER:-840225427682}"
-          _ca_region="${FM_CODEARTIFACT_REGION:-us-east-1}"
-          _ca_repo="${FM_CODEARTIFACT_REPO:-npm}"
-          _ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"
-          if _ca_token=$(aws codeartifact get-authorization-token \
-                --domain "$_ca_domain" --domain-owner "$_ca_owner" \
-                --region "$_ca_region" --query authorizationToken --output text 2>/dev/null) \
-             && [ -n "$_ca_token" ]; then
-            {
-              printf 'registry=https://%s/npm/%s/\n' "$_ca_host" "$_ca_repo"
-              printf '//%s/npm/%s/:_authToken=%s\n' "$_ca_host" "$_ca_repo" "$_ca_token"
-              printf '//%s/npm/%s/:always-auth=true\n' "$_ca_host" "$_ca_repo"
-            } > "$WT/.npmrc"
-            exclude_path '.npmrc'
+          if git -C "$WT" ls-files --error-unmatch .npmrc >/dev/null 2>&1; then
+            # .npmrc is git-tracked (the common committed-CodeArtifact-.npmrc pattern).
+            # Overwriting it with a live token would leave a dirty tracked file an
+            # autonomous crewmate could commit and push, and .git/info/exclude cannot
+            # hide an already-tracked path. Never write the token into git's view; the
+            # crewmate must rely on the repo's own env-based CodeArtifact auth.
+            echo "warning: $WT/.npmrc is git-tracked; refusing to vend a CodeArtifact token into a tracked file for $ID. The sandboxed crewmate must rely on the repo's own env-based CodeArtifact auth." >&2
           else
-            echo "warning: CodeArtifact token vend failed for $ID; sandboxed crewmate npm/pnpm installs will fail until a valid AWS session vends a token" >&2
+            _ca_domain="${FM_CODEARTIFACT_DOMAIN:-mavtek}"
+            _ca_owner="${FM_CODEARTIFACT_OWNER:-840225427682}"
+            _ca_region="${FM_CODEARTIFACT_REGION:-us-east-1}"
+            _ca_repo="${FM_CODEARTIFACT_REPO:-npm}"
+            _ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"
+            if _ca_token=$(aws codeartifact get-authorization-token \
+                  --domain "$_ca_domain" --domain-owner "$_ca_owner" \
+                  --region "$_ca_region" --query authorizationToken --output text 2>/dev/null) \
+               && [ -n "$_ca_token" ]; then
+              {
+                printf 'registry=https://%s/npm/%s/\n' "$_ca_host" "$_ca_repo"
+                printf '//%s/npm/%s/:_authToken=%s\n' "$_ca_host" "$_ca_repo" "$_ca_token"
+                printf '//%s/npm/%s/:always-auth=true\n' "$_ca_host" "$_ca_repo"
+              } > "$WT/.npmrc"
+              exclude_path '.npmrc'
+            else
+              echo "warning: CodeArtifact token vend failed for $ID; sandboxed crewmate npm/pnpm installs will fail until a valid AWS session vends a token" >&2
+            fi
+            unset _ca_token
           fi
-          unset _ca_token
         fi
       fi
       ;;
