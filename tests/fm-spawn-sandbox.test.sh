@@ -109,6 +109,7 @@ case "$src" in
 esac
 # The write + exclude only happen in the untracked branch (after the ls-files guard),
 # so a tracked, committed .npmrc is never left dirty with a live token.
+# shellcheck disable=SC2016  # matching literal source text; $WT must stay unexpanded
 case "$src" in
   *'ls-files --error-unmatch .npmrc'*'} > "$WT/.npmrc"'*'exclude_path '\''.npmrc'\'''*)
     pass "untracked .npmrc: token is written and git-excluded" ;;
@@ -129,11 +130,13 @@ esac
 
 # A worker srt cannot wrap (secondmate, or a non-claude harness) fails closed under
 # strict srt/on: REFUSE and exit, never launch unconfined. auto only warns and launches.
+# shellcheck disable=SC2016  # matching literal source text; $KIND, $HARNESS, $CREW_SANDBOX_MODE must stay unexpanded
 case "$src" in
   *'if [ "$KIND" = secondmate ] || [ "$HARNESS" != claude ]; then'*'if [ "$CREW_SANDBOX_MODE" = srt ]; then'*'refusing to launch $HARNESS $KIND unconfined'*'exit 1'*)
     pass "strict srt/on refuses (exits) a non-claude crewmate or any secondmate" ;;
   *) fail "strict srt/on must refuse a non-claude/secondmate worker, not launch it unconfined" ;;
 esac
+# shellcheck disable=SC2016  # matching literal source text; $CREW_SANDBOX_MODE, $HARNESS, $KIND must stay unexpanded
 case "$src" in
   *'config/crew-sandbox=$CREW_SANDBOX_MODE requested, but srt confinement covers claude ship/scout crewmates only; launching $HARNESS $KIND unconfined.'*)
     pass "auto (non-claude/secondmate) warns and continues to a plain launch" ;;
@@ -202,6 +205,7 @@ case "$settings_alt" in
 esac
 # fm-spawn.sh must derive the vended host from the SAME FM_CODEARTIFACT_* source it
 # passes to emit-settings, so the allowlist and the .npmrc registry cannot diverge.
+# shellcheck disable=SC2016  # matching literal source text; $_ca_*, $WT, $TASK_TMP, $TURNEND, $_ca_host must stay unexpanded
 case "$src" in
   *'_ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"'*'emit-settings "$WT" "$TASK_TMP" "$TURNEND" "$_ca_host"'*)
     pass "fm-spawn.sh derives _ca_host once and passes it to emit-settings (allowlist == vend host)" ;;
