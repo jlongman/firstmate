@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Test: user-configurable crewmate OS confinement via srt (docs/crewmate-sandbox.md).
 #
-# Guards the two launch paths fm-spawn.sh builds for a claude crewmate and the
-# per-task srt-settings.json the sandbox policy owner emits:
+# Behavioral coverage (per the repo's behavioral-over-source-content test convention):
+# every check EXERCISES the shipped code - the launch-template builder, the
+# config/crew-sandbox mode resolution, the CodeArtifact vend guard, and the
+# srt-settings.json generator - rather than grepping fm-spawn.sh source text. The
+# blocks that live in fm-spawn.sh's main body (which needs a live backend to run
+# end-to-end) are extracted and driven in isolation with stubs and fixtures.
+#
 #   - srt OFF (default; config/crew-sandbox absent or "off"): the plain launch,
 #     byte-identical to before this change - claude --dangerously-skip-permissions
 #     with the unchanged __OPINPUT__ brief-passing, no srt, no env scrub.
@@ -10,9 +15,9 @@
 #     `env -u <secrets> srt --settings <file> ... claude --dangerously-skip-permissions`,
 #     plus a correct srt-settings.json (network allowlist, denyRead, allowWrite with
 #     the resolved absolute git-common-dir and a SINGLE-file turn-end allow, and a
-#     denyWrite that re-blocks the parent .git/config and hooks).
+#     denyWrite that re-blocks the parent .git/config, hooks, and claude's own hooks).
 #
-# This asserts the config is GENERATED correctly. It CANNOT assert the OS sandbox
+# This proves the config is GENERATED correctly. It CANNOT assert the OS sandbox
 # ENFORCES it - that needs a live Seatbelt/bubblewrap probe on a real host (see
 # docs/crewmate-sandbox.md "Verifying enforcement" and the smoke check in
 # bin/fm-check-sandbox-policy.sh preflight). srt is not required to run this test.
@@ -30,12 +35,14 @@ pass() { echo "ok: $*"; }
 [ -f "$SPAWN" ] || fail "bin/fm-spawn.sh not found at $SPAWN"
 [ -x "$POLICY" ] || fail "bin/fm-check-sandbox-policy.sh not found or not executable at $POLICY"
 
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-sandbox.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
+
 # ---------------------------------------------------------------------------
 # 1. LAUNCH TEMPLATES: extract launch_template() and exercise both paths.
 # ---------------------------------------------------------------------------
 # The function is self-contained (printf + case, no globals), so eval it in
-# isolation rather than driving the full fm-spawn.sh preamble (which needs a live
-# backend). This directly proves off vs on without a live session.
+# isolation and assert on the command string it PRODUCES (its behavior), not on the
+# source file. This directly proves off vs on without a live session.
 fn=$(awk '/^launch_template\(\) \{/{f=1} f{print} f&&/^\}/{c++} c>0{exit}' "$SPAWN")
 [ -n "$fn" ] || fail "could not extract launch_template() from fm-spawn.sh"
 eval "$fn"
@@ -76,93 +83,178 @@ do
 done
 pass "srt-on launch scrubs all six secret vars, wraps in srt --settings, keeps --dangerously-skip-permissions and the brief-passing"
 
-# The scrub must run OUTSIDE the wall: env -u ... must precede __SRTCMD__.
+# The scrub must run OUTSIDE the wall: env -u ... must precede __SRTCMD__. The
+# CLAUDE_CONFIG_DIR forwarding prefix (fm-spawn.sh, upstream #1195) does NOT strip
+# CLAUDE_CONFIG_DIR here - the scrub list is exactly the six secret vars.
 case "$srt" in
   *"env -u ANTHROPIC_API_KEY"*"__SRTCMD__ --settings"*) pass "env scrub runs outside srt (srt does not scrub env itself)" ;;
   *) fail "srt-on launch must scrub env BEFORE the srt invocation" ;;
 esac
-
-# ---------------------------------------------------------------------------
-# 2. CONFIG-MODE WIRING (static invariants on fm-spawn.sh source).
-# ---------------------------------------------------------------------------
-src=$(cat "$SPAWN")
-need() { case "$src" in *"$1"*) pass "$2" ;; *) fail "$2 (missing: $1)" ;; esac; }
-
-need 'config/crew-sandbox'                 "reads the config/crew-sandbox knob"
-need 'on|srt) CREW_SANDBOX_MODE=srt'       "on and srt both select the srt mode"
-need 'auto)   CREW_SANDBOX_MODE=auto'      "auto mode is accepted"
-need "''|off) CREW_SANDBOX_MODE=off"       "absent/off maps to off (the default)"
-need 'SANDBOX_ACTIVE=1'                    "SANDBOX_ACTIVE is the single gate for the srt path"
-need 'emit-settings'                       "srt-settings.json is generated from the policy owner"
-need 'exclude_path '\''srt-settings.json'\''' "srt-settings.json is git-excluded like other generated worktree files"
-# shellcheck disable=SC2016  # matching literal source text; $ must stay unexpanded
-need 'echo "sandbox=$SANDBOX_META"'        "meta records sandbox=on|off"
-need 'codeartifact'                        "CodeArtifact token vend is present"
-
-# The vend must never write a live token into a git-tracked .npmrc: guard on the
-# path being untracked, warn-and-skip when tracked, and only write+exclude when not.
-need 'ls-files --error-unmatch .npmrc'     "CodeArtifact vend guards on .npmrc being untracked"
-case "$src" in
-  *'ls-files --error-unmatch .npmrc'*'refusing to vend a CodeArtifact token into a tracked file'*)
-    pass "tracked .npmrc: vend refuses and warns (no token written, no exclude_path)" ;;
-  *) fail "tracked .npmrc must be skipped with a warning, never overwritten with a token" ;;
-esac
-# The write + exclude only happen in the untracked branch (after the ls-files guard),
-# so a tracked, committed .npmrc is never left dirty with a live token.
-# shellcheck disable=SC2016  # matching literal source text; $WT must stay unexpanded
-case "$src" in
-  *'ls-files --error-unmatch .npmrc'*'} > "$WT/.npmrc"'*'exclude_path '\''.npmrc'\'''*)
-    pass "untracked .npmrc: token is written and git-excluded" ;;
-  *) fail "untracked .npmrc write + exclude_path must follow the ls-files untracked guard" ;;
-esac
-
-# srt/on must REFUSE the spawn on a failed preflight; auto must fall back with a warning.
-case "$src" in
-  *'config/crew-sandbox=srt but the srt preflight failed'*'refusing to launch unconfined'*)
-    pass "srt/on refuses the spawn (exits) when the preflight fails" ;;
-  *) fail "srt/on must refuse the spawn on preflight failure, not fall back silently" ;;
-esac
-case "$src" in
-  *'config/crew-sandbox=auto but the srt preflight failed'*'launching unconfined'*)
-    pass "auto falls back to a plain launch with a loud warning on preflight failure" ;;
-  *) fail "auto must warn and fall back to a plain launch on preflight failure" ;;
-esac
-
-# A worker srt cannot wrap (secondmate, or a non-claude harness) fails closed under
-# strict srt/on: REFUSE and exit, never launch unconfined. auto only warns and launches.
-# shellcheck disable=SC2016  # matching literal source text; $KIND, $HARNESS, $CREW_SANDBOX_MODE must stay unexpanded
-case "$src" in
-  *'if [ "$KIND" = secondmate ] || [ "$HARNESS" != claude ]; then'*'if [ "$CREW_SANDBOX_MODE" = srt ]; then'*'refusing to launch $HARNESS $KIND unconfined'*'exit 1'*)
-    pass "strict srt/on refuses (exits) a non-claude crewmate or any secondmate" ;;
-  *) fail "strict srt/on must refuse a non-claude/secondmate worker, not launch it unconfined" ;;
-esac
-# shellcheck disable=SC2016  # matching literal source text; $CREW_SANDBOX_MODE, $HARNESS, $KIND must stay unexpanded
-case "$src" in
-  *'config/crew-sandbox=$CREW_SANDBOX_MODE requested, but srt confinement covers claude ship/scout crewmates only; launching $HARNESS $KIND unconfined.'*)
-    pass "auto (non-claude/secondmate) warns and continues to a plain launch" ;;
-  *) fail "auto must warn and launch a non-claude/secondmate worker unconfined" ;;
-esac
-
-# The turn-end Stop hook is unchanged and stays a SINGLE-file allow (never the whole state dir).
-# shellcheck disable=SC2016  # matching literal source text; $TURNEND must stay unexpanded
-case "$src" in
-  *'"command":"touch '"'"'$TURNEND'"'"'"'*) pass "turn-end Stop hook is unchanged (touches the single turn-ended file)" ;;
-  *) fail "turn-end Stop hook must be preserved unchanged" ;;
-esac
-
-# The srt-settings generation and the vend are gated on SANDBOX_ACTIVE, so the OFF
-# path never writes srt-settings.json or a vended .npmrc.
-# shellcheck disable=SC2016  # matching literal source text; $SANDBOX_ACTIVE must stay unexpanded
-case "$src" in
-  *'if [ "$SANDBOX_ACTIVE" = 1 ]; then'*'emit-settings'*) pass "srt-settings + vend are gated behind SANDBOX_ACTIVE (OFF path writes neither)" ;;
-  *) fail "srt-settings/vend must be gated on SANDBOX_ACTIVE" ;;
+case "$srt" in
+  *CLAUDE_CONFIG_DIR*) fail "the srt scrub list must not mention CLAUDE_CONFIG_DIR (it must reach the sandboxed claude)" ;;
+  *) pass "the env scrub does not strip CLAUDE_CONFIG_DIR (auth store forwarding survives into the sandbox)" ;;
 esac
 
 # ---------------------------------------------------------------------------
-# 3. srt-settings.json SHAPE (dynamic, via the policy owner). No srt needed.
+# 2. CONFIG-MODE RESOLUTION (behavioral: extract the block and run it).
 # ---------------------------------------------------------------------------
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-sandbox.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
+# fm-spawn.sh resolves config/crew-sandbox into CREW_SANDBOX_MODE + SANDBOX_ACTIVE
+# (and refuses/warns) before any worktree exists. Extract that block and drive it
+# with a stub policy script + real config fixtures, asserting the resolved outcome
+# and the fail-closed exit - real behavior, not a source grep.
+MODE_BLOCK=$(awk '/^CREW_SANDBOX_MODE=off$/{f=1} f{print} /^fi$/&&f{n++} f&&n==2{exit}' "$SPAWN")
+[ -n "$MODE_BLOCK" ] || fail "could not extract the crew-sandbox mode-resolution block from fm-spawn.sh"
 
+STUB_DIR="$TMP/stub"; mkdir -p "$STUB_DIR"
+cat > "$STUB_DIR/fm-check-sandbox-policy.sh" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  preflight) exit "${STUB_PREFLIGHT_RC:-0}" ;;
+  resolve)   if [ "${STUB_RESOLVE_OK:-1}" = 1 ]; then echo srt; exit 0; fi; exit 1 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$STUB_DIR/fm-check-sandbox-policy.sh"
+
+# run_mode <config-value|__ABSENT__> <kind> <harness> <preflight_rc> <resolve_ok>
+# Prints "MODE=<mode> ACTIVE=<0|1>" on a completed (non-refusing) resolution; a
+# refusal exits non-zero and prints nothing. Stderr is captured to $TMP/mode.err.
+run_mode() {
+  local cfgval=$1 kind=$2 harness=$3 pf=$4 rok=$5 cfgdir
+  cfgdir=$(mktemp -d "$TMP/cfg.XXXXXX")
+  [ "$cfgval" = "__ABSENT__" ] || printf '%s' "$cfgval" > "$cfgdir/crew-sandbox"
+  (
+    set +e
+    export STUB_PREFLIGHT_RC="$pf" STUB_RESOLVE_OK="$rok"
+    # shellcheck disable=SC2034  # consumed inside the evaluated MODE_BLOCK
+    CONFIG=$cfgdir KIND=$kind HARNESS=$harness SCRIPT_DIR=$STUB_DIR
+    eval "$MODE_BLOCK"
+    echo "MODE=$CREW_SANDBOX_MODE ACTIVE=$SANDBOX_ACTIVE"
+  ) 2>"$TMP/mode.err"
+}
+
+expect_mode() { # <label> <expected "MODE=.. ACTIVE=..">  reads $out/$rc from caller
+  if [ "$rc" -ne 0 ]; then fail "$1: resolution refused (exit $rc) but expected to complete"; fi
+  [ "$out" = "$2" ] || fail "$1: expected '$2', got '$out'"
+  pass "$1"
+}
+expect_refuse() { # <label> <stderr-substring>
+  [ "$rc" -ne 0 ] || fail "$1: expected a fail-closed refusal (non-zero exit) but it completed: '$out'"
+  case "$(cat "$TMP/mode.err")" in
+    *"$2"*) pass "$1" ;;
+    *) fail "$1: refused but the reason did not match '$2'" ;;
+  esac
+}
+
+# absent / off / off-with-trailing-comment -> off, inactive (the #first-token parse:
+# trailing content after the first token must not break the default).
+if out=$(run_mode __ABSENT__ ship claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "absent config -> off, inactive" "MODE=off ACTIVE=0"
+if out=$(run_mode "off" ship claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "off -> off, inactive" "MODE=off ACTIVE=0"
+if out=$(run_mode "$(printf 'off\n# a trailing comment line\n')" ship claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "first-token parse: 'off' + trailing content -> off (no hard-fail)" "MODE=off ACTIVE=0"
+
+# srt / on / SRT (case-insensitive) -> srt, active for a claude crewmate when preflight passes.
+if out=$(run_mode "srt" ship claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "srt (claude, preflight ok) -> srt, active" "MODE=srt ACTIVE=1"
+if out=$(run_mode "on" scout claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "on is an alias for srt -> srt, active" "MODE=srt ACTIVE=1"
+if out=$(run_mode "SRT" ship claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "value is case-insensitive (SRT) -> srt, active" "MODE=srt ACTIVE=1"
+if out=$(run_mode "auto" ship claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "auto (claude, preflight ok) -> auto, active" "MODE=auto ACTIVE=1"
+
+# Preflight failure: strict srt REFUSES; auto falls back to a plain (inactive) launch.
+if out=$(run_mode "srt" ship claude 1 1); then rc=0; else rc=$?; fi
+expect_refuse "srt + failing preflight refuses the spawn (fail closed)" "refusing to launch unconfined"
+if out=$(run_mode "auto" ship claude 1 1); then rc=0; else rc=$?; fi
+expect_mode "auto + failing preflight -> auto, inactive (warn + plain launch)" "MODE=auto ACTIVE=0"
+
+# An unrecognized value is a hard error, never a silent default.
+if out=$(run_mode "bogus" ship claude 0 1); then rc=0; else rc=$?; fi
+expect_refuse "unrecognized config value refuses" "unrecognized value"
+
+# Fail closed for a worker srt cannot wrap: strict srt REFUSES a non-claude crewmate
+# or any secondmate; auto only warns and launches unconfined.
+if out=$(run_mode "srt" ship codex 0 1); then rc=0; else rc=$?; fi
+expect_refuse "strict srt refuses a non-claude crewmate (fail closed)" "refusing to launch codex ship unconfined"
+if out=$(run_mode "srt" secondmate claude 0 1); then rc=0; else rc=$?; fi
+expect_refuse "strict srt refuses a secondmate (fail closed)" "refusing to launch claude secondmate unconfined"
+if out=$(run_mode "auto" ship codex 0 1); then rc=0; else rc=$?; fi
+expect_mode "auto + non-claude -> auto, inactive (warn + unconfined launch)" "MODE=auto ACTIVE=0"
+if out=$(run_mode "auto" secondmate claude 0 1); then rc=0; else rc=$?; fi
+expect_mode "auto + secondmate -> auto, inactive (warn + unconfined launch)" "MODE=auto ACTIVE=0"
+
+# ---------------------------------------------------------------------------
+# 3. CodeArtifact vend guard (behavioral: extract the vend block and run it).
+# ---------------------------------------------------------------------------
+# The vend must NEVER write a live token into a git-tracked .npmrc (a dirty tracked
+# file an autonomous crewmate could commit). Extract the _ca_* host derivation plus
+# the vend guard and drive it against tracked / untracked fixtures with a stub aws.
+CA_VARS=$(awk '/_ca_domain=/{f=1} f{print} /_ca_host=/{exit}' "$SPAWN")
+VEND_GUARD=$(awk '/grep -qs .codeartifact./{f=1} f{print} f&&/^        fi$/{exit}' "$SPAWN")
+[ -n "$CA_VARS" ] || fail "could not extract the _ca_* host derivation from fm-spawn.sh"
+[ -n "$VEND_GUARD" ] || fail "could not extract the CodeArtifact vend guard from fm-spawn.sh"
+VEND_BLOCK="$CA_VARS
+$VEND_GUARD"
+
+# run_vend <absent|tracked|untracked> <aws-ok|aws-fail>  -> sets $VWT (worktree),
+# writes stderr to $TMP/vend.err. .npmrc content is inspected by the caller.
+run_vend() {
+  local state=$1 aws=$2
+  VWT=$(mktemp -d "$TMP/vend.XXXXXX")
+  git -C "$VWT" init -q
+  case "$state" in
+    tracked)
+      printf 'registry=https://host/codeartifact/npm/\n' > "$VWT/.npmrc"
+      git -C "$VWT" add .npmrc
+      git -C "$VWT" -c user.email=t@t -c user.name=t commit -q -m npmrc ;;
+    untracked)
+      printf 'registry=https://host/codeartifact/npm/\n' > "$VWT/.npmrc" ;;
+    absent) : ;;
+  esac
+  (
+    set +e
+    # shellcheck disable=SC2034  # consumed inside the evaluated VEND_BLOCK
+    WT=$VWT ID=vend-test FM_CODEARTIFACT_DOMAIN=mavtek
+    # shellcheck disable=SC2329  # invoked inside the evaluated VEND_BLOCK
+    exclude_path() { :; }
+    # shellcheck disable=SC2329  # invoked inside the evaluated VEND_BLOCK
+    if [ "$aws" = aws-ok ]; then aws() { echo "tok-STUB-123"; }; else aws() { return 1; }; fi
+    eval "$VEND_BLOCK"
+  ) 2>"$TMP/vend.err"
+}
+
+run_vend tracked aws-ok
+case "$(cat "$TMP/vend.err")" in
+  *"refusing to vend a CodeArtifact token into a tracked file"*) : ;;
+  *) fail "vend: a tracked .npmrc must be refused with a warning" ;;
+esac
+case "$(cat "$VWT/.npmrc")" in
+  *_authToken*) fail "vend: a tracked .npmrc must NOT be overwritten with a live token" ;;
+  *) pass "vend: tracked .npmrc is refused - no token written into git's view" ;;
+esac
+
+run_vend untracked aws-ok
+case "$(cat "$VWT/.npmrc")" in
+  *"_authToken=tok-STUB-123"*) pass "vend: untracked .npmrc receives the vended token" ;;
+  *) fail "vend: an untracked .npmrc must receive the vended token" ;;
+esac
+
+run_vend untracked aws-fail
+case "$(cat "$TMP/vend.err")" in
+  *"CodeArtifact token vend failed"*) : ;;
+  *) fail "vend: a failed token fetch must warn" ;;
+esac
+case "$(cat "$VWT/.npmrc")" in
+  *_authToken*) fail "vend: a failed token fetch must not write a token" ;;
+  *) pass "vend: a failed token fetch warns and writes no token" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 4. srt-settings.json SHAPE (behavioral, via the policy owner). No srt needed.
+# ---------------------------------------------------------------------------
 # A LINKED worktree so we prove the git-common-dir resolves to the MAIN repo's .git
 # (the security-critical property; a per-worktree .git would miss the parent config).
 git -C "$TMP" init -q main
@@ -202,14 +294,6 @@ esac
 case "$settings_alt" in
   *'mavtek-840225427682.d.codeartifact.us-east-1.amazonaws.com'*) fail "settings: the default host must be REPLACED by the host argument, not both present" ;;
   *) pass "settings: the host argument replaces the default (no drift between allowlist and vend)" ;;
-esac
-# fm-spawn.sh must derive the vended host from the SAME FM_CODEARTIFACT_* source it
-# passes to emit-settings, so the allowlist and the .npmrc registry cannot diverge.
-# shellcheck disable=SC2016  # matching literal source text; $_ca_*, $WT, $TASK_TMP, $TURNEND, $_ca_host must stay unexpanded
-case "$src" in
-  *'_ca_host="${_ca_domain}-${_ca_owner}.d.codeartifact.${_ca_region}.amazonaws.com"'*'emit-settings "$WT" "$TASK_TMP" "$TURNEND" "$_ca_host"'*)
-    pass "fm-spawn.sh derives _ca_host once and passes it to emit-settings (allowlist == vend host)" ;;
-  *) fail "fm-spawn.sh must compute _ca_host once and pass it to emit-settings" ;;
 esac
 
 # Filesystem reads: the credential dirs are denied.
@@ -267,7 +351,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. POLICY OWNER resolution + preflight refusal semantics.
+# 5. POLICY OWNER resolution + refusal semantics.
 # ---------------------------------------------------------------------------
 # resolve prints a usable srt invocation (srt on PATH, else the npx fallback) when
 # either is available; this host has one, so it must be non-empty.
