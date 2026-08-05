@@ -117,15 +117,27 @@ EOF
   ej_gcd=$(json_escape "$gcd")
   ej_turn=$(json_escape "$turnend")
 
+  # Claude Code writes its Bash-tool shell scratch under /private/tmp/claude-<uid>/
+  # (its own per-user temp root, independent of TMPDIR); without write access there a
+  # confined crewmate's Bash tool dies on mkdir EPERM and cannot run git/gh/npm. Allow
+  # that harness scratch root - it holds only ephemeral shell state, never credentials,
+  # the repo, or hooks, which stay protected by denyRead/denyWrite below. Both the
+  # /private/tmp real path (macOS Seatbelt canonicalizes to it) and the /tmp alias
+  # (other platforms) are listed so the match holds wherever claude places it.
+  local claude_uid ej_claude_real ej_claude_alt
+  claude_uid=$(id -u)
+  ej_claude_real=$(json_escape "/private/tmp/claude-$claude_uid")
+  ej_claude_alt=$(json_escape "/tmp/claude-$claude_uid")
+
   # allowWrite scope, in order: the worktree (.), the task temp root (Go build temp
   # and other per-task scratch; srt does not auto-add it), the shared git-common-dir
   # and everything under it (branch/ref/index writes in a linked worktree), the
   # SINGLE turn-end file outside the worktree (the Stop hook's only external write -
-  # never the whole state/ dir), and claude's own home config it writes at runtime.
-  # denyWrite wins over allowWrite and re-blocks the parent .git/config and hooks, and
-  # claude's own hook-execution config (~/.claude/settings*.json and ~/.claude/hooks)
-  # so a confined crewmate cannot plant a global hook that runs in the captain's
-  # future unconfined claude sessions.
+  # never the whole state/ dir), claude's per-user shell-scratch root (above), and
+  # claude's own home config it writes at runtime. denyWrite wins over allowWrite and
+  # re-blocks the parent .git/config and hooks, and claude's own hook-execution config
+  # (~/.claude/settings*.json and ~/.claude/hooks) so a confined crewmate cannot plant
+  # a global hook that runs in the captain's future unconfined claude sessions.
   cat <<EOF
 {
   "network": {
@@ -140,6 +152,10 @@ EOF
       "$ej_gcd",
       "$ej_gcd/**",
       "$ej_turn",
+      "$ej_claude_real",
+      "$ej_claude_real/**",
+      "$ej_claude_alt",
+      "$ej_claude_alt/**",
       "~/.claude",
       "~/.claude.json"
     ],

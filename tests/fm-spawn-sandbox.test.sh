@@ -308,6 +308,15 @@ sneed "\"$TURNEND\""                                "allowWrite includes the sin
 sneed '"~/.claude"'                                 "allowWrite includes ~/.claude"
 sneed '"~/.claude.json"'                            "allowWrite includes ~/.claude.json"
 
+# allowWrite includes claude's per-user Bash-tool shell-scratch root (both the
+# /private/tmp real path and the /tmp alias) so a confined crewmate's Bash tool can
+# create its shell working dir under /private/tmp/claude-<uid>/ instead of dying on
+# mkdir EPERM. This is the write that unblocks git/gh/npm inside the wall.
+CLAUDE_UID=$(id -u)
+sneed "\"/private/tmp/claude-$CLAUDE_UID\""          "allowWrite includes claude's shell-scratch root (/private/tmp real path)"
+sneed "\"/private/tmp/claude-$CLAUDE_UID/**\""       "allowWrite includes everything under claude's shell-scratch root"
+sneed "\"/tmp/claude-$CLAUDE_UID\""                  "allowWrite includes the /tmp alias of claude's shell-scratch root"
+
 # The turn-end allow is a SINGLE file, never the whole state dir.
 case "$settings" in
   *"\"$TMP/home/state\""|*"\"$TMP/home/state\","*|*"\"$TMP/home/state/**\""*)
