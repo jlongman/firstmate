@@ -802,6 +802,11 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    # Re-mint aging vended GitHub push tokens for srt-confined tasks (a fresh ~1h
+    # token before the current one expires), riding this existing sweep. No-op
+    # unless a GitHub App is configured and a confined task carries a vended
+    # credential; fail-safe so a token hiccup never disturbs supervision.
+    "$FM_ROOT/bin/fm-gh-token-refresh.sh" >/dev/null 2>&1 || true
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue

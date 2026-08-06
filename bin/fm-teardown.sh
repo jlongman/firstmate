@@ -338,6 +338,11 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+# Wipe any vended GitHub push credential before the worktree is returned, so a
+# short-lived repo-scoped token never lingers in a pooled/reused worktree.
+if [ -n "$WT" ] && [ -d "$WT" ]; then
+  rm -f "$WT/.git-credentials" "$WT/.fm-gitconfig" 2>/dev/null || true
+fi
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then

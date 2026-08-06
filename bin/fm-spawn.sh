@@ -974,6 +974,7 @@ if [ -f "$CONFIG/crew-sandbox" ]; then
 fi
 SANDBOX_ACTIVE=0
 SRT_CMD=
+GH_VEND_REPO=
 if [ "$CREW_SANDBOX_MODE" != off ]; then
   if [ "$KIND" = secondmate ] || [ "$HARNESS" != claude ]; then
     # srt wraps `claude`; it has nothing to wrap for another harness, and secondmate
@@ -1953,6 +1954,42 @@ EOF
             unset _ca_token
           fi
         fi
+        # GitHub App push-token vend: srt denies ~/.config/gh and ~/.ssh and env -u
+        # scrubs GH_TOKEN/GITHUB_TOKEN, so a confined crewmate has no GitHub auth.
+        # When a GitHub App is configured (config/gh-app-id + config/gh-app.pem),
+        # mint a short-lived repo-scoped token and set up a worktree-local git
+        # credential the crewmate only READS, so it can push over the allowlisted
+        # github.com. Best-effort: no App or a mint failure warns and launches (the
+        # task then simply cannot push, as before). The watcher re-mints on its
+        # sweep (gh_vend_repo in meta) so a long task's token never expires;
+        # teardown wipes the credential file.
+        if [ -f "$FM_ROOT/config/gh-app-id" ] && [ -f "$FM_ROOT/config/gh-app.pem" ]; then
+          _gh_repo=$(git -C "$WT" remote get-url origin 2>/dev/null \
+            | sed -E 's#^https://github\.com/##; s#^git@github\.com:##; s#\.git$##')
+          case "$_gh_repo" in
+            */*)
+              if _gh_token=$("$FM_ROOT/bin/fm-gh-app-token.sh" "$_gh_repo" 2>/dev/null) \
+                 && [ -n "$_gh_token" ]; then
+                ( umask 077; printf 'https://x-access-token:%s@github.com\n' "$_gh_token" > "$WT/.git-credentials" )
+                # A worktree-local GIT_CONFIG_GLOBAL that (a) includes the captain's
+                # real ~/.gitconfig for identity, (b) reads the vended token via a
+                # store file, and (c) rewrites SSH github remotes to HTTPS so the
+                # token is used (srt denies ~/.ssh, so an SSH remote cannot auth).
+                {
+                  printf '[include]\n\tpath = %s/.gitconfig\n' "$HOME"
+                  printf '[credential]\n\thelper = store --file=%s/.git-credentials\n' "$WT"
+                  printf '[url "https://github.com/"]\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@github.com/\n'
+                } > "$WT/.fm-gitconfig"
+                exclude_path '.git-credentials'
+                exclude_path '.fm-gitconfig'
+                GH_VEND_REPO=$_gh_repo
+                unset _gh_token
+              else
+                echo "warning: GitHub App token vend failed for $ID ($_gh_repo); sandboxed crewmate cannot push until this is fixed" >&2
+              fi
+              ;;
+          esac
+        fi
       fi
       ;;
     opencode*)
@@ -2184,6 +2221,7 @@ META_WINDOW=$T
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "sandbox=$SANDBOX_META"
+  [ -z "$GH_VEND_REPO" ] || echo "gh_vend_repo=$GH_VEND_REPO"
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2250,6 +2288,14 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# GitHub App push-token: when a repo-scoped token was vended for this srt-confined
+# claude crewmate (GH_VEND_REPO set), point its git at the worktree-local credential
+# via GIT_CONFIG_GLOBAL. Set OUTSIDE the wall; srt passes env through, so git inside
+# uses it to push over the allowlisted github.com. The .fm-gitconfig includes the
+# captain's real ~/.gitconfig so identity and settings are preserved.
+if [ -n "$GH_VEND_REPO" ] && [ "$HARNESS" = claude ]; then
+  LAUNCH="GIT_CONFIG_GLOBAL=$(shell_quote "$WT/.fm-gitconfig") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
